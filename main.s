@@ -62,6 +62,7 @@ endstruc
 %define SYS_CLOSE          3
 %define SYS_EPOLL_WAIT   232
 
+%define SO_REUSEADDR  2
 %define PF_INET       2
 %define SOCK_STREAM   1
 %define IPPROTO_IP    0
@@ -75,6 +76,7 @@ endstruc
 
 %define MAX_EVENTS     10
 %define MAX_COROUTINES 10
+%define BACKLOG        5
 
 %define listening_fd 3
 %define epoll_fd     4
@@ -158,14 +160,14 @@ _start:
 	mov rdx, IPPROTO_IP  ; protocol
 	syscall
 
-	mov dword [optval], 1
+	mov dword [optval], 1 ; true
 
 	mov rax, SYS_SETSOCKOPT
 	mov rdi, listening_fd ; fd
 	mov rsi, SOL_SOCKET   ; level
-	mov rdx, 2            ; optname
+	mov rdx, SO_REUSEADDR ; optname
 	lea r10, [optval]     ; optval
-	mov r8, 4             ; optlen
+	mov r8, optlen        ; optlen
 	syscall
 
 	mov rax, SYS_BIND
@@ -176,7 +178,7 @@ _start:
 
 	mov rax, SYS_LISTEN
 	mov rdi, listening_fd ; fd
-	mov rsi, 5  		  ; backlog
+	mov rsi, BACKLOG      ; backlog
 	syscall
 
 	; Initialize listening coroutine
@@ -204,13 +206,22 @@ loop:
 	mov r10, -1             ; timeout
 	syscall
 
-	sal rax, 2 ; rax *= 4
+	sal rax, 2
 	lea rax, [3*rax]
+	; multiply rax by 12
+
+	%if epoll_event.size != 12
+		%error "epoll_event.size must be 12"
+	%endif
 
 	; rax is now pointing to just past the last epoll event
 
 inner_loop:
-	sub rax, 12
+	sub rax, epoll_event.size
+
+	%if coroutine.size != 256
+		%error "coroutine.size must be 256"
+	%endif
 
 	mov rbp, [events+rax+epoll_event.data]
 	sal rbp, 8
@@ -244,12 +255,14 @@ len3: equ $-msg3
 section .bss
 
 optval: resd 1
+optlen: equ $-optval
+
 temp_epoll_event: resb (epoll_event.size)
 
 buffer: resb 1000
 buffer_len: equ $-buffer
 
-events: resb (12*MAX_EVENTS)
+events: resb (epoll_event.size*MAX_EVENTS)
 coroutines: resb (coroutine.size*MAX_COROUTINES)
 
 accept_sockaddr: resb sockaddr.size
