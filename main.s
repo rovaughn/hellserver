@@ -46,7 +46,7 @@ endstruc
 struc coroutine
 	.rip:     resq 1
 	.ret:     resq 1
-	.scratch: resb (1024 - 24)
+	.scratch: resb (256 - 16)
 	.size:
 endstruc
 
@@ -68,6 +68,7 @@ endstruc
 %define SOL_SOCKET    1
 %define EPOLL_CTL_ADD 1
 %define EPOLLIN       1
+%define EPOLLET       (1<<31)
 %define STDIN_FILENO  0
 %define STDOUT_FILENO 1
 %define STDERR_FILENO 2
@@ -75,11 +76,12 @@ endstruc
 %define MAX_EVENTS     10
 %define MAX_COROUTINES 10
 
+%define listening_fd 3
+%define epoll_fd     4
+
 ; Jumps into a coroutine whose address is %1.  Sets up its stack so that it will
 ; return to where it was called.  Coroutine can't use rbp.
-%macro coroutine_call 1
-	mov rbp, %1
-
+%macro coroutine_call 0
 	; Set the return address.
 	mov qword [rbp + coroutine.ret], %%after
 
@@ -99,13 +101,55 @@ section .text
 global _start
 
 listening_coroutine:
-	mov rax, SYS_WRITE
-	mov rdi, STDOUT_FILENO
-	mov rsi, msg3
-	mov rdx, len3
+	mov rax, SYS_ACCEPT
+	mov rdi, listening_fd
+	mov rsi, accept_sockaddr
+	mov rdx, accept_addrlen
 	syscall
+	mov r9, rax
+
+	mov rbx, r9
+	sal rbx, 8
+	mov qword [coroutines+rbx+coroutine.rip], handle_socket
+	mov qword [coroutines+rbx+coroutine.scratch+handle_socket_scratch.fd], r9
+
+	mov dword [temp_epoll_event+epoll_event.events], EPOLLIN
+	mov qword [temp_epoll_event+epoll_event.data], r9
+
+	mov rax, SYS_EPOLL_CTL
+	mov rdi, epoll_fd
+	mov rsi, EPOLL_CTL_ADD
+	mov rdx, r9
+	mov r10, temp_epoll_event
+	syscall
+
 	coroutine_yield
 	jmp listening_coroutine
+
+struc handle_socket_scratch
+	.fd: resq 1
+endstruc
+
+handle_socket:
+	mov r9, [rbp+coroutine.scratch+handle_socket_scratch.fd]
+
+	mov rax, SYS_READ
+	mov rdi, r9
+	mov rsi, buffer
+	mov rdx, buffer_len
+	syscall
+
+	mov rax, SYS_WRITE
+	mov rdi, r9
+	mov rsi, msg
+	mov rdx, len
+	syscall
+
+	mov rax, SYS_CLOSE
+	mov rdi, r9
+	syscall
+
+	coroutine_yield
 
 _start:
 	mov rax, SYS_SOCKET
@@ -113,83 +157,69 @@ _start:
 	mov rsi, SOCK_STREAM ; type
 	mov rdx, IPPROTO_IP  ; protocol
 	syscall
-	mov r9, rax ; r9 = listening fd
 
 	mov dword [optval], 1
 
 	mov rax, SYS_SETSOCKOPT
-	mov rdi, r9         ; fd
-	mov rsi, SOL_SOCKET ; level
-	mov rdx, 2          ; optname
-	lea r10, [optval]   ; optval
-	mov r8, 4           ; optlen
+	mov rdi, listening_fd ; fd
+	mov rsi, SOL_SOCKET   ; level
+	mov rdx, 2            ; optname
+	lea r10, [optval]     ; optval
+	mov r8, 4             ; optlen
 	syscall
 
 	mov rax, SYS_BIND
-	mov rdi, r9       ; fd
-	mov rsi, addr     ; umyaddr
-	mov rdx, addr_len ; addrlen
+	mov rdi, listening_fd ; fd
+	mov rsi, addr         ; umyaddr
+	mov rdx, addr_len     ; addrlen
 	syscall
 
 	mov rax, SYS_LISTEN
-	mov rdi, r9 		; fd
-	mov rsi, 5  		; backlog
+	mov rdi, listening_fd ; fd
+	mov rsi, 5  		  ; backlog
 	syscall
 
 	; Initialize listening coroutine
-	mov qword [coroutines+3*coroutine.size+coroutine.rip], listening_coroutine
+	mov qword [coroutines+listening_fd*coroutine.size+coroutine.rip], listening_coroutine
 
 	mov rax, SYS_EPOLL_CREATE
-	mov rdi, 1                ; size (ignored, but must be positive)
+	mov rdi, 1 ; size (ignored, but must be positive)
 	syscall
-	mov r13, rax ; r13 = epoll fd
 
 	mov dword [temp_epoll_event+epoll_event.events], EPOLLIN
-	mov qword [temp_epoll_event+epoll_event.data], r9
+	mov qword [temp_epoll_event+epoll_event.data], listening_fd
 
 	mov rax, SYS_EPOLL_CTL
-	mov rdi, r13                    ; epfd
+	mov rdi, epoll_fd               ; epfd
 	mov rsi, EPOLL_CTL_ADD          ; op
-	mov rdx, r9                     ; fd
+	mov rdx, listening_fd           ; fd
 	lea r10, [temp_epoll_event]     ; event
 	syscall
 
 loop:
 	mov rax, SYS_EPOLL_WAIT
-	mov rdi, r13            ; epfd
+	mov rdi, epoll_fd       ; epfd
 	mov rsi, events         ; struct epoll_event *events
 	mov rdx, MAX_EVENTS     ; maxevents
 	mov r10, -1             ; timeout
 	syscall
 
-	; rax contains the number of events
-	mov r14, epoll_event_size
-	mul r14
-	lea r14, [events+rax]
-	; now r14 should be events+epoll_event_size*n_events
+	sal rax, 2 ; rax *= 4
+	lea rax, [3*rax]
+
+	; rax is now pointing to just past the last epoll event
 
 inner_loop:
-	sub r14, epoll_event.size
+	sub rax, 12
 
-	mov rax, SYS_WRITE
-	mov rdi, STDOUT_FILENO
-	mov rsi, msg1
-	mov rdx, len1
-	syscall
+	mov rbp, [events+rax+epoll_event.data]
+	sal rbp, 8
+	add rbp, coroutines
+	coroutine_call
 
-	mov r15, [r14+epoll_event.data]
-	sal r15, 10
-	coroutine_call (coroutines+3*coroutine.size) ; CHANGE BACK TO coroutines + r15
-
-	mov rax, SYS_WRITE
-	mov rdi, STDOUT_FILENO
-	mov rsi, msg2
-	mov rdx, len2
-	syscall
-
-	cmp r14, events
-
+	cmp rax, 0
 	jne inner_loop
+
 	jmp loop
 
 section .data
@@ -219,6 +249,8 @@ temp_epoll_event: resb (epoll_event.size)
 buffer: resb 1000
 buffer_len: equ $-buffer
 
-events: resb (epoll_event.size*MAX_EVENTS)
+events: resb (12*MAX_EVENTS)
 coroutines: resb (coroutine.size*MAX_COROUTINES)
 
+accept_sockaddr: resb sockaddr.size
+accept_addrlen:  resd 1
