@@ -1,10 +1,13 @@
 
-main: main.o
-	ld -o main main.o
+test: echo
+	./test.sh
 
-main.o: main.s
-	nasm -f elf64 -o main.o main.s
+echo: echo.o
+	ld -o $@ $^
+
+echo.o: main.s constants.s coroutine.s echo.s
+	nasm -f elf64 -g -o $@ -d listen_port=8000 -p echo.s main.s
 
 clean:
-	rm -f main.o main
+	xargs -a .gitignore rm -f
 

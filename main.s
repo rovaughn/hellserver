@@ -1,102 +1,31 @@
 
-; struct sockaddr_in {
-; 	uint16_t      sin_family;
-;   uint16_t      sin_port;
-;   uint32_t      sin_addr;
-;   unsigned char __pad[8];
-; }
+%include "constants.s"
+%include "coroutine.s"
 
-struc sockaddr_in
-	.family: resw 1
-	.port:   resw 1
-	.addr:   resd 1
-	.pad:    resb 8
-	.size:
-endstruc
+%use ifunc
 
-; struct sockaddr {
-; 	uint16_t sa_family;
-;	char     sa_data[14];
-; }
+%ifndef MAX_EVENTS
+	%define MAX_EVENTS     10
+%endif
 
-struc sockaddr
-	.family: resw 1
-	.data:   resb 14
-	.size:
-endstruc
+%ifndef MAX_COROUTINES
+	%define MAX_COROUTINES 10
+%endif
 
-; typedef union epoll_data {
-;	void     *ptr;
-;	int       fd;
-;   uint32_t  u32;
-;   uint64_t  u64;
-; }
-;
-; struct epoll_event {
-; 	uint32_t     events;
-;	epoll_data_t data;
-; }
+%ifndef BACKLOG
+	%define BACKLOG         5
+%endif
 
-struc epoll_event
-	.events: resd 1
-	.data:   resq 1
-	.size:
-endstruc
+%ifndef listen_addr
+	%define listen_addr 127,0,0,1
+%endif
 
-struc coroutine
-	.rip:     resq 1
-	.ret:     resq 1
-	.scratch: resb (256 - 16)
-	.size:
-endstruc
-
-%define SYS_SOCKET        41
-%define SYS_SETSOCKOPT    54
-%define SYS_BIND          49
-%define SYS_LISTEN        50
-%define SYS_EPOLL_CREATE 213
-%define SYS_EPOLL_CTL    233
-%define SYS_ACCEPT        43
-%define SYS_READ           0
-%define SYS_WRITE          1
-%define SYS_CLOSE          3
-%define SYS_EPOLL_WAIT   232
-
-%define SO_REUSEADDR  2
-%define PF_INET       2
-%define SOCK_STREAM   1
-%define IPPROTO_IP    0
-%define SOL_SOCKET    1
-%define EPOLL_CTL_ADD 1
-%define EPOLLIN       1
-%define EPOLLET       (1<<31)
-%define STDIN_FILENO  0
-%define STDOUT_FILENO 1
-%define STDERR_FILENO 2
-
-%define MAX_EVENTS     10
-%define MAX_COROUTINES 10
-%define BACKLOG        5
+%ifndef listen_port
+	%define listen_port 80
+%endif
 
 %define listening_fd 3
 %define epoll_fd     4
-
-; Jumps into a coroutine whose address is %1.  Sets up its stack so that it will
-; return to where it was called.  Coroutine can't use rbp.
-%macro coroutine_call 0
-	; Set the return address.
-	mov qword [rbp + coroutine.ret], %%after
-
-	; Jump
-	jmp [rbp + coroutine.rip]
-%%after:
-%endmacro
-
-%macro coroutine_yield 0
-	mov qword [rbp + coroutine.rip], %%after
-	jmp [rbp + coroutine.ret]
-%%after:
-%endmacro
 
 section .text
 
@@ -111,11 +40,11 @@ listening_coroutine:
 	mov r9, rax
 
 	mov rbx, r9
-	sal rbx, 8
-	mov qword [coroutines+rbx+coroutine.rip], handle_socket
-	mov qword [coroutines+rbx+coroutine.scratch+handle_socket_scratch.fd], r9
+	sal rbx, ilog2(coroutin.size)
+	mov qword [coroutines+rbx+coroutin.rip], handle_conn
+	mov qword [coroutines+rbx+coroutin.scratch], r9
 
-	mov dword [temp_epoll_event+epoll_event.events], EPOLLIN
+	mov dword [temp_epoll_event+epoll_event.events], EPOLLIN | EPOLLOUT
 	mov qword [temp_epoll_event+epoll_event.data], r9
 
 	mov rax, SYS_EPOLL_CTL
@@ -127,31 +56,6 @@ listening_coroutine:
 
 	coroutine_yield
 	jmp listening_coroutine
-
-struc handle_socket_scratch
-	.fd: resq 1
-endstruc
-
-handle_socket:
-	mov r9, [rbp+coroutine.scratch+handle_socket_scratch.fd]
-
-	mov rax, SYS_READ
-	mov rdi, r9
-	mov rsi, buffer
-	mov rdx, buffer_len
-	syscall
-
-	mov rax, SYS_WRITE
-	mov rdi, r9
-	mov rsi, msg
-	mov rdx, len
-	syscall
-
-	mov rax, SYS_CLOSE
-	mov rdi, r9
-	syscall
-
-	coroutine_yield
 
 _start:
 	mov rax, SYS_SOCKET
@@ -182,7 +86,7 @@ _start:
 	syscall
 
 	; Initialize listening coroutine
-	mov qword [coroutines+listening_fd*coroutine.size+coroutine.rip], listening_coroutine
+	mov qword [coroutines+listening_fd*coroutin.size+coroutin.rip], listening_coroutine
 
 	mov rax, SYS_EPOLL_CREATE
 	mov rdi, 1 ; size (ignored, but must be positive)
@@ -219,15 +123,14 @@ loop:
 inner_loop:
 	sub rax, epoll_event.size
 
-	%if coroutine.size != 256
-		%error "coroutine.size must be 256"
-	%endif
+	mov qword [rsp - 8], rax
 
 	mov rbp, [events+rax+epoll_event.data]
-	sal rbp, 8
+	sal rbp, ilog2(coroutine_size)
 	add rbp, coroutines
 	coroutine_call
 
+	mov rax, [rsp - 8]
 	cmp rax, 0
 	jne inner_loop
 
@@ -235,35 +138,25 @@ inner_loop:
 
 section .data
 
-addr: dw 2            ; family = AF_INET
-      dw 8000         ; port   = 8000
-	  db 127, 0, 0, 1 ; addr   = 127.0.0.1
-addr_len: equ $-addr+8
-
-msg: db "HTTP/1.1 200 OK", 13, 10, "Host: example.com", 13, 10, 13, 10, "<p>hello</p>"
-len: equ $-msg
-
-msg1: db "Before coroutine", 10
-len1: equ $-msg1
-
-msg2: db "After coroutine", 10
-len2: equ $-msg2
-
-msg3: db "Inside coroutine", 10
-len3: equ $-msg3
+addr: dw AF_INET
+      dw listen_port
+	  db listen_addr
+	  dq 0           ; padding
+addr_len: equ $-addr
 
 section .bss
 
 optval: resd 1
 optlen: equ $-optval
 
-temp_epoll_event: resb (epoll_event.size)
-
 buffer: resb 1000
 buffer_len: equ $-buffer
 
 events: resb (epoll_event.size*MAX_EVENTS)
-coroutines: resb (coroutine.size*MAX_COROUTINES)
+coroutines: resb (coroutin.size*MAX_COROUTINES)
+
+temp_epoll_event: resb (epoll_event.size)
 
 accept_sockaddr: resb sockaddr.size
 accept_addrlen:  resd 1
+
