@@ -1,5 +1,5 @@
 
-%include "constants.s"
+%include "linux.s"
 %include "coroutine.s"
 
 %use ifunc
@@ -16,11 +16,15 @@
 	%define BACKLOG         5
 %endif
 
-%ifndef listen_addr
+%ifndef N_THREADS
+	%define N_THREADS 1
+%endif
+
+%ifndef LISTEN_ADDR
 	%define listen_addr 127,0,0,1
 %endif
 
-%ifndef listen_port
+%ifndef LISTEN_PORT
 	%define listen_port 80
 %endif
 
@@ -96,10 +100,10 @@ _start:
 	mov qword [temp_epoll_event+epoll_event.data], listening_fd
 
 	mov rax, SYS_EPOLL_CTL
-	mov rdi, epoll_fd               ; epfd
-	mov rsi, EPOLL_CTL_ADD          ; op
-	mov rdx, listening_fd           ; fd
-	lea r10, [temp_epoll_event]     ; event
+	mov rdi, epoll_fd           ; epfd
+	mov rsi, EPOLL_CTL_ADD      ; op
+	mov rdx, listening_fd       ; fd
+	lea r10, [temp_epoll_event] ; event
 	syscall
 
 loop:
@@ -145,6 +149,9 @@ addr: dw AF_INET
 addr_len: equ $-addr
 
 section .bss
+
+parent_tid: resq 1
+child_tid:  resq 1
 
 optval: resd 1
 optlen: equ $-optval

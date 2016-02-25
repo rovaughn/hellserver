@@ -1,3 +1,5 @@
 echo
 echo.o
+unit-test.o
+unit-test.out
 test-log

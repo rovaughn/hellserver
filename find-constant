@@ -1,0 +1,13 @@
+#!/bin/sh -ue
+
+cd ~/code/linux
+for constant in $@
+do
+    value=$(
+        ag -G '.*\.[ch]' "define $constant" |
+        grep -oP "define\s+$constant\s+\S+" |
+        awk '{ print $3 }'
+    )
+    echo "%define $constant $value"
+done
+

@@ -5,6 +5,8 @@
 	%define coroutine_size 256
 %endif
 
+%define coroutine_scratch_size (coroutine_size - 16)
+
 ;struc coroutine
 ;	.rip:     resq 1
 ;	.ret:     resq 1
@@ -15,7 +17,7 @@
 struc coroutin
 .rip: resq 1
 .ret: resq 1
-.scratch: resb (coroutine_size - 16)
+.scratch: resb coroutine_scratch_size
 .size:
 endstruc
 
